@@ -1,7 +1,7 @@
-# FIXED-IP WINDOWS RDP USING TAILSCALE
-# INSECURE: Only for private test use
+# FIXED-IP WINDOWS RDP WITH TAILSCALE
+# INSECURE: ONLY for private testing
 
-name: Ultimate Fixed-IP RDP
+name: Fixed-IP RDP Ultimate
 
 on:
   workflow_dispatch:
@@ -15,39 +15,37 @@ concurrency:
 jobs:
   rdp:
     runs-on: windows-latest
-    timeout-minutes: 1439
+    timeout-minutes: 1440
 
     steps:
-      - name: Enable RDP + Disable NLA
+      - name: Enable RDP and Configure Firewall
         shell: pwsh
         run: |
           # Enable RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
             -Name "fDenyTSConnections" -Value 0 -Force
 
-          # Disable NLA
+          # Disable NLA (UserAuthentication=0)
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "UserAuthentication" -Value 0 -Force
-
-          # Disable RDP encryption (needed for GitHub runners)
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "SecurityLayer" -Value 0 -Force
 
-          # Open firewall port
+          # Firewall allow RDP
           netsh advfirewall firewall delete rule name="RDP-Fixed-IP" > $null 2>&1
           netsh advfirewall firewall add rule name="RDP-Fixed-IP" dir=in action=allow protocol=TCP localport=3389
 
+          # Restart RDP service
           Restart-Service TermService -Force
 
       - name: Create RDP User
         shell: pwsh
         run: |
-          $pass = ConvertTo-SecureString "Mustakfnp!" -AsPlainText -Force
-
+          $Password = ConvertTo-SecureString "Mustakfnp!" -AsPlainText -Force
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
-            Set-LocalUser -Name "RDP" -Password $pass
+            Set-LocalUser -Name "RDP" -Password $Password
           } else {
-            New-LocalUser -Name "RDP" -Password $pass -AccountNeverExpires
+            New-LocalUser -Name "RDP" -Password $Password -AccountNeverExpires
             Add-LocalGroupMember -Group "Administrators" -Member "RDP"
             Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           }
@@ -55,39 +53,47 @@ jobs:
       - name: Install Tailscale
         shell: pwsh
         run: |
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $file = "$env:TEMP\ts.msi"
-          Invoke-WebRequest -Uri $url -OutFile $file
-          Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
-          Remove-Item $file -Force
+          $URL = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $File = "$env:TEMP\ts.msi"
+          Invoke-WebRequest -Uri $URL -OutFile $File
+          Start-Process msiexec.exe -ArgumentList "/i `"$File`" /quiet /norestart" -Wait
+          Remove-Item $File -Force
 
-      - name: Connect Tailscale (Fixed-IP Mode)
+      - name: Connect Tailscale (Fixed-IP)
         shell: pwsh
         env:
           AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
           if (-not $env:AUTHKEY) {
-            Write-Error "Missing TAILSCALE_AUTH_KEY secret"
+            Write-Error "TAILSCALE_AUTH_KEY missing"
             exit 1
           }
 
-          # FIXED HOSTNAME → always same IP
           $TS_HOSTNAME = "mustak-pro-fixed"
 
-          # Logout previous stale connections
+          # Full cleanup
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" down > $null 2>&1
           & "$env:ProgramFiles\Tailscale\tailscale.exe" logout > $null 2>&1
 
-          # Connect to Tailscale
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+          # Connect
+          $result = & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
             --authkey $env:AUTHKEY `
             --hostname $TS_HOSTNAME `
             --accept-routes `
             --accept-dns=true `
             --advertise-exit-node=false `
-            --reset
+            --reset 2>&1
 
-          # Fetch Tailscale IP
+          Write-Host "TAILSCALE OUTPUT:"
+          Write-Host $result
+
+          # Detect IP
           $TS_IP = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4)[0]
+
+          if (-not $TS_IP -or $TS_IP -eq "0.0.0.1") {
+            Write-Error "Failed to get valid Tailscale IP. Output: $result"
+            exit 1
+          }
 
           echo "TSIP=$TS_IP" >> $env:GITHUB_ENV
           Write-Host "Tailscale Fixed IP: $TS_IP"
@@ -95,16 +101,28 @@ jobs:
       - name: Verify RDP Port
         shell: pwsh
         run: |
-          if (-not (Test-NetConnection -ComputerName $env:TSIP -Port 3389 -InformationLevel Quiet)) {
-            Write-Error "RDP Port 3389 NOT reachable"
-            exit 1
+          Write-Host "Checking RDP port on $env:TSIP..."
+          $retries = 0
+          while ($retries -lt 5) {
+              if (Test-NetConnection -ComputerName $env:TSIP -Port 3389 -InformationLevel Quiet) {
+                  Write-Host "RDP Port 3389 reachable ✔"
+                  break
+              } else {
+                  Write-Host "Waiting for RDP port..."
+                  Start-Sleep -Seconds 5
+                  $retries++
+              }
           }
-          Write-Host "RDP OK ✔"
+
+          if ($retries -ge 5) {
+              Write-Error "RDP Port 3389 still not reachable"
+              exit 1
+          }
 
       - name: Keep Runner Alive
         shell: pwsh
         run: |
           while ($true) {
-            Write-Host "[$(Get-Date -Format o)] Runner Active — Fixed IP: $env:TSIP"
+            Write-Host "[$(Get-Date -Format o)] RDP Active at $env:TSIP"
             Start-Sleep 300
           }
