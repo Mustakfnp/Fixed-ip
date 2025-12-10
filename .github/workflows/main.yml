@@ -33,7 +33,7 @@ jobs:
 
           # Firewall allow RDP
           netsh advfirewall firewall delete rule name="RDP-Fixed-IP" > $null 2>&1
-          netsh advfirewall firewall add rule name="RDP-Fixed-IP" dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="RDP-Fixed-IP" dir=in action=allow protocol=TCP localport=3381
 
           # Restart RDP service
           Restart-Service TermService -Force
