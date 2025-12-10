@@ -1,5 +1,5 @@
-# SUPER FIXED-IP WINDOWS RDP (Tailscale Optimized)
-# INSECURE: only for private testing
+# FIXED-IP WINDOWS RDP USING TAILSCALE
+# INSECURE: Only for private test use
 
 name: Ultimate Fixed-IP RDP
 
@@ -18,25 +18,28 @@ jobs:
     timeout-minutes: 1439
 
     steps:
-      - name: Enable RDP Access + Disable NLA
+      - name: Enable RDP + Disable NLA
         shell: pwsh
         run: |
+          # Enable RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
             -Name "fDenyTSConnections" -Value 0 -Force
 
-          # Disable NLA for smooth RDP
+          # Disable NLA
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "UserAuthentication" -Value 0 -Force
+
+          # Disable RDP encryption (needed for GitHub runners)
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "SecurityLayer" -Value 0 -Force
 
-          # Firewall open
-          netsh advfirewall firewall delete rule name="RDP-Fixed" > $null 2>&1
-          netsh advfirewall firewall add rule name="RDP-Fixed" dir=in action=allow protocol=TCP localport=3389
+          # Open firewall port
+          netsh advfirewall firewall delete rule name="RDP-Fixed-IP" > $null 2>&1
+          netsh advfirewall firewall add rule name="RDP-Fixed-IP" dir=in action=allow protocol=TCP localport=3389
 
           Restart-Service TermService -Force
 
-      - name: Create RDP User (Admin)
+      - name: Create RDP User
         shell: pwsh
         run: |
           $pass = ConvertTo-SecureString "Mustakfnp!" -AsPlainText -Force
@@ -56,57 +59,52 @@ jobs:
           $file = "$env:TEMP\ts.msi"
           Invoke-WebRequest -Uri $url -OutFile $file
           Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
-          Remove-Item $file
+          Remove-Item $file -Force
 
-      - name: Tailscale Connect (Static Device)
+      - name: Connect Tailscale (Fixed-IP Mode)
         shell: pwsh
         env:
           AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
           if (-not $env:AUTHKEY) {
-            Write-Error "Missing TAILSCALE_AUTH_KEY"
+            Write-Error "Missing TAILSCALE_AUTH_KEY secret"
             exit 1
           }
 
-          # FIXED hostname → FIXED IP
-          $HOST = "mustak-pro-fixed"
+          # FIXED HOSTNAME → always same IP
+          $TS_HOSTNAME = "mustak-pro-fixed"
 
-          # Cleanup old stale device to avoid duplicates
+          # Logout previous stale connections
           & "$env:ProgramFiles\Tailscale\tailscale.exe" logout > $null 2>&1
 
-          # Connect with:
-          # • Reusable key
-          # • MagicDNS support
-          # • Exit-node routing allowed (optional)
-          # • Auto NAT traversal + STUN
+          # Connect to Tailscale
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
-             --authkey $env:AUTHKEY `
-             --hostname $HOST `
-             --accept-routes `
-             --accept-dns=true `
-             --advertise-exit-node=false `
-             --reset
+            --authkey $env:AUTHKEY `
+            --hostname $TS_HOSTNAME `
+            --accept-routes `
+            --accept-dns=true `
+            --advertise-exit-node=false `
+            --reset
 
-          # Fetch assigned IP
+          # Fetch Tailscale IP
           $TS_IP = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4)[0]
-          echo "TSIP=$TS_IP" >> $env:GITHUB_ENV
 
-      - name: Port Check
+          echo "TSIP=$TS_IP" >> $env:GITHUB_ENV
+          Write-Host "Tailscale Fixed IP: $TS_IP"
+
+      - name: Verify RDP Port
         shell: pwsh
         run: |
-          Write-Host "Tailscale Fixed IP: $env:TSIP"
-
           if (-not (Test-NetConnection -ComputerName $env:TSIP -Port 3389 -InformationLevel Quiet)) {
-            Write-Error "RDP port unreachable"
+            Write-Error "RDP Port 3389 NOT reachable"
             exit 1
           }
-
           Write-Host "RDP OK ✔"
 
-      - name: Keep Alive
+      - name: Keep Runner Alive
         shell: pwsh
         run: |
           while ($true) {
-            Write-Host "[$(Get-Date -Format o)] RDP ACTIVE — Fixed IP: $env:TSIP"
+            Write-Host "[$(Get-Date -Format o)] Runner Active — Fixed IP: $env:TSIP"
             Start-Sleep 300
           }
